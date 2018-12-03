@@ -14,14 +14,26 @@ module Bellmunt
   def self.reference
     BWA.references.hs37d5['hs37d5.fa'].find
   end
+
   def self.path
     Rbbt.share.projects.Bellmunt
   end
+
   def self.interval_list
     Rbbt.share.projects.Bellmunt['intervals.bed'].find
   end
 
-  dep HTS, :BAM_rescore do |jobname,options|
+  def self.pon
+    Rbbt.share.projects.Bellmunt['pon.vcf'].find
+  end
+
+  def self.af_not_in_resource
+    0.0000025
+  end
+
+
+  dep HTS, :BAM_rescore, :fastq1 => :placeholder, :fastq2 => :placeholder, :reference => :placeholder,
+    :interval_list => Bellmunt.interval_list do |jobname,options|
 
     sample = jobname
     options[:fastq1] = self.path[sample + "_1.fastq.gz"].find
@@ -31,7 +43,6 @@ module Bellmunt
 
     {:inputs => options, :jobname => jobname}
   end
-
   task :BAM => :binary do 
     Open.rm self.path
     Open.ln_s step(:BAM_rescore).path, self.path
@@ -39,12 +50,16 @@ module Bellmunt
   end
 
   dep :BAM
-  dep HTS, :mutect2_clean, :tumor => :BAM do |jobname,options|
-   sample = jobname
-   options[:reference] = Bellmunt.reference
-   options[:fastq1] = self.path[sample + "_1.fastq.gz"].find
-   options[:fastq2] = self.path[sample + "_2.fastq.gz"].find
-   {:inputs => options}
+  dep HTS, :mutect2_clean, :tumor => :BAM, :normal => nil, :reference => :placeholder,
+    :interval_list => Bellmunt.interval_list,
+    :pon => Bellmunt.pon,
+    :af_not_in_resource => Bellmunt.af_not_in_resource do |jobname,options,dependencies|
+      sample = jobname
+      reference = dependencies.first.recursive_inputs[:reference]
+
+      options[:reference] = reference
+
+      {:inputs => options, :jobname => jobname}
   end
   task :somatic_mutations => :tsv do
     TSV.get_stream step(:mutect2_clean)
