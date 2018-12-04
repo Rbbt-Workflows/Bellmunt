@@ -12,7 +12,7 @@ Workflow.require_workflow "Sequence"
 module Bellmunt
   extend Workflow
   def self.reference
-    BWA.references.hs37d5['hs37d5.fa'].find
+		'b37'
   end
 
   def self.path
@@ -20,17 +20,20 @@ module Bellmunt
   end
 
   def self.interval_list
-    Rbbt.share.projects.Bellmunt['intervals.bed'].find
+		Rbbt.share.projects.Bellmunt.data['Padded.hs37d5.bed'].find
   end
 
   def self.pon
-    Rbbt.share.projects.Bellmunt['pon.vcf'].find
+		Rbbt.share.projects.Bellmunt.data['pon.vcf'].find
   end
 
   def self.af_not_in_resource
     0.0000025
   end
 
+  def self.germline_resource
+    GATK.known_sites.b37["af-only-gnomad.vcf"].produce.find
+	end
 
   dep HTS, :BAM_rescore, :fastq1 => :placeholder, :fastq2 => :placeholder, :reference => :placeholder,
     :interval_list => Bellmunt.interval_list do |jobname,options|
@@ -53,6 +56,7 @@ module Bellmunt
   dep HTS, :mutect2_clean, :tumor => :BAM, :normal => nil, :reference => :placeholder,
     :interval_list => Bellmunt.interval_list,
     :pon => Bellmunt.pon,
+		:germline_resource => Bellmunt.germline_resource,
     :af_not_in_resource => Bellmunt.af_not_in_resource do |jobname,options,dependencies|
       sample = jobname
       reference = dependencies.first.recursive_inputs[:reference]
