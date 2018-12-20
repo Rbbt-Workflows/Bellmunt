@@ -7,13 +7,20 @@ Misc.add_libdir if __FILE__ == $0
 
 Workflow.require_workflow "HTS"
 Workflow.require_workflow "Sequence"
-#Workflow.require_workflow "HLA"
+Workflow.require_workflow "Sample"
+Workflow.require_workflow "HLA"
+Workflow.require_workflow "CFDTL"
 
 module Bellmunt
   extend Workflow
   def self.reference
     'b37'
   end
+
+  def self.organism
+    'feb2014'
+  end
+
 
   def self.path
     Rbbt.share.projects.Bellmunt
@@ -35,7 +42,11 @@ module Bellmunt
     GATK.known_sites.b37["af-only-gnomad.vcf.gz"].produce.find
 	end
 
-  dep HTS, :BAM_rescore, :fastq1 => :placeholder, :fastq2 => :placeholder, :reference => :placeholder,
+  dep_task :reliable_mutations, Bellmunt, :genomic_mutations
+
+  extension :bam
+  dep HTS, :BAM_rescore, 
+    :fastq1 => :placeholder, :fastq2 => :placeholder, :reference => :placeholder,
     :sample_name => :placeholder,
     :platform_unit => :placeholder,
     :read_group_name => :placeholder,
@@ -86,28 +97,24 @@ module Bellmunt
       raise "Number of fastq is not 2 or 4: #{Misc.fingerprint sample_fastqs}"
     end
   end
-  dep HTS, :BAM_multiplex, :reference => Bellmunt.reference, :bam_files => :placeholder do |jobname,options, dependencies|
+  dep HTS, :BAM_multiplex, :compute => :ignore, :reference => Bellmunt.reference, :bam_files => :placeholder do |jobname,options,dependencies|
     if dependencies.flatten.length > 1
-      {:inputs => options.merge(:bam_files => dependencies.flatten.collect{|dep| dep.path})}
+      {:jobname => jobname, :inputs => options.merge(:bam_files => dependencies.flatten.collect{|dep| dep.path})}
     else
       []
     end
   end
-  dep HTS, :BAM_rescore do |jobname,options, dependencies|
+  dep_task :BAM, HTS, :BAM_rescore do |jobname,options, dependencies|
     if (mutiplex = dependencies.flatten.select{|dep| dep.task_name == :BAM_multiplex}.first)
-      {:inputs => options.merge("HTS#BAM_duplicates" =>  mutiplex)}
+      {:inputs => options.merge("HTS#BAM_duplicates" =>  mutiplex), :jobname => jobname + '_multiplexed'}
     else
       []
     end
-  end
-  task :BAM => :binary do 
-    Open.rm self.path
-    Open.ln_s step(:BAM_rescore).path, self.path
-    nil
   end
 
   dep :BAM
-  dep HTS, :mutect2_clean, :tumor => :BAM, :normal => nil, :reference => :placeholder,
+  extension :vcf
+  dep_task :mutect2_snv, HTS, :mutect2_clean, :tumor => :BAM, :normal => nil, :reference => :placeholder,
     :interval_list => Bellmunt.interval_list,
     :pon => Bellmunt.pon,
 		:germline_resource => Bellmunt.germline_resource,
@@ -115,20 +122,76 @@ module Bellmunt
       sample = jobname
       reference = dependencies.first.recursive_inputs[:reference]
 
-      options[:reference] = reference
+      options[:reference] = Bellmunt.reference
 
       {:inputs => options, :jobname => jobname}
   end
-  task :somatic_mutations => :tsv do
-    TSV.get_stream step(:mutect2_clean)
+
+  dep :BAM
+  extension :vcf
+  dep_task :strelka, HTS, :strelka, :tumor => :BAM, :normal => nil, :reference => :placeholder do |jobname,options,dependencies|
+      sample = jobname
+      reference = dependencies.first.recursive_inputs[:reference]
+
+      options[:reference] = Bellmunt.reference
+
+      {:inputs => options, :jobname => jobname}
   end
 
-  dep :somatic_mutations
-  dep Sequence, :affected_genes, :mutations => :somatic_mutations, :organism => "Hsa/feb2014"
-  task :affected_genes => :array do
-    TSV.get_stream step(:affected_genes)
+  dep :mutect2_snv, :compute => :produce
+  dep_task :affected_genes, Sequence, :affected_genes, :mutations => :mutect2_snv, :organism => "Hsa/feb2014", :vcf => true
+
+  dep :mutect2_snv, :compute => :produce
+  dep_task :snv_annotations, Sample, :genomic_mutation_annotations, :file => :mutect2_snv, :vcf => true, :organism => Bellmunt.organism
+
+  dep_task :OptiType, HLA, :OptiType do |jobname, options|
+    sample_name = jobname
+
+    options[:sample_name] = sample_name.gsub('_', '.')
+
+    options[:reference] = Bellmunt.reference
+    sample_fastqs = []
+    Bellmunt.path.glob("*.fastq.gz").each do |file|
+      basename = File.basename(file)
+      sample_fastqs << file if basename.split("_")[2] == sample_name
+    end
+    {:inputs => options.merge(:files => sample_fastqs), :jobname => jobname}
   end
 
+  dep :BAM
+  dep_task :SOAPHLA, HLA, :SOAPHLA, :BAM => :BAM, :reference => Bellmunt.reference
+
+  dep :mutect2_snv
+  dep_task :genomic_mutations, Sequence, :genomic_mutations, :vcf_file => :mutect2_snv
+
+  task :organism => :text do
+    Bellmunt.organism
+  end
+
+end
+
+module Sample
+
+  dep Bellmunt, :mutect2_snv
+  dep_task :genomic_mutations, Sequence, :genomic_mutations, :vcf_file => :mutect2_snv
+
+  dep Bellmunt, :mutect2_snv
+  dep_task :expanded_vcf, Sequence, :expanded_vcf, :vcf_file => :mutect2_snv
+
+  extension :bam
+  dep_task :BAM, Bellmunt, :BAM
+
+  task :organism => :text do
+    Bellmunt.organism
+  end
+
+  task :reference => :text do
+    Bellmunt.reference
+  end
+
+  task :watson => :boolean do
+    true
+  end
 end
 
 #require 'Bellmunt/tasks/basic.rb'
