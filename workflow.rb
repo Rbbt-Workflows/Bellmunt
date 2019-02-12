@@ -18,7 +18,7 @@ module Bellmunt
   end
 
   def self.organism
-    'feb2014'
+    'Hsa/feb2014'
   end
 
 
@@ -43,6 +43,13 @@ module Bellmunt
 	end
 
   dep_task :reliable_mutations, Bellmunt, :genomic_mutations
+
+  task :samples => :array do
+    Bellmunt.path.glob("*.fastq.gz").collect do |file|
+      basename = File.basename(file)
+      basename.split("_")[2] 
+    end.uniq.sort
+  end
 
   extension :bam
   dep HTS, :BAM_rescore, 
@@ -120,7 +127,6 @@ module Bellmunt
 		:germline_resource => Bellmunt.germline_resource,
     :af_not_in_resource => Bellmunt.af_not_in_resource do |jobname,options,dependencies|
       sample = jobname
-      reference = dependencies.first.recursive_inputs[:reference]
 
       options[:reference] = Bellmunt.reference
 
@@ -129,17 +135,16 @@ module Bellmunt
 
   dep :BAM
   extension :vcf
-  dep_task :strelka, HTS, :strelka, :tumor => :BAM, :normal => nil, :reference => :placeholder do |jobname,options,dependencies|
-      sample = jobname
-      reference = dependencies.first.recursive_inputs[:reference]
+  dep_task :strelka_snv, HTS, :strelka, :tumor => :BAM, :normal => nil, :reference => :placeholder do |jobname,options,dependencies|
+    sample = jobname
 
-      options[:reference] = Bellmunt.reference
+    options[:reference] = Bellmunt.reference
 
-      {:inputs => options, :jobname => jobname}
+    {:inputs => options, :jobname => jobname}
   end
 
   dep :mutect2_snv, :compute => :produce
-  dep_task :affected_genes, Sequence, :affected_genes, :mutations => :mutect2_snv, :organism => "Hsa/feb2014", :vcf => true
+  dep_task :affected_genes, Sequence, :affected_genes, :mutations => :mutect2_snv, :organism => Bellmunt.organism, :vcf => true
 
   dep :mutect2_snv, :compute => :produce
   dep_task :snv_annotations, Sample, :genomic_mutation_annotations, :file => :mutect2_snv, :vcf => true, :organism => Bellmunt.organism
@@ -161,6 +166,16 @@ module Bellmunt
   dep :BAM
   dep_task :SOAPHLA, HLA, :SOAPHLA, :BAM => :BAM, :reference => Bellmunt.reference
 
+  dep :SOAPHLA
+  input :secondary_alleles, :boolean, "Include secondary alleles", false
+  task :alleles => :array do |secondary_alleles|
+    if secondary_alleles
+      step(:SOAPHLA).join.path.read.split("\n").collect{|line| line.split("\t").values_at(0,1)}.uniq - ["-"]
+    else
+      step(:SOAPHLA).join.path.read.split("\n").collect{|line| line.split("\t").first}.uniq
+    end
+  end
+
   dep :mutect2_snv
   dep_task :genomic_mutations, Sequence, :genomic_mutations, :vcf_file => :mutect2_snv
 
@@ -168,6 +183,43 @@ module Bellmunt
     Bellmunt.organism
   end
 
+  dep :genomic_mutations
+  dep :alleles
+  dep PVacSeq, :analysis, :positions => :genomic_mutations, :alleles => :alleles
+  task :neo_epitopes => :tsv do
+
+    parser = TSV::Parser.new step(:analysis).join, :type => :list
+    dumper = TSV::Dumper.new parser.options.merge(:key_field => "Genomic Mutation", :namespace => CFDTL.organism, :fields => parser.fields[4..-1])
+    dumper.init
+    TSV.traverse parser, :into => dumper do |chr, values|
+      start, eend, ref, mut, *rest = values
+      start = start.to_i
+      start = start + 1 if ref.length == 1 && mut.length == 1
+      pos, muts = Misc.correct_vcf_mutation start, ref, mut
+
+      mutation = [chr, pos, muts.first] * ":"
+      [mutation, values[4..-1]]
+    end
+  end
+
+  dep :neo_epitopes
+  input :fold_change, :float, "Fold-change threshold", 0
+  input :binding_affinity, :float, "Binding affinity threshold", 500
+  task :neo_epitopes_filtered => :tsv do |fold_change,binding_affinity|
+    TmpFile.with_file do |tmpdir|
+      main = File.join(tmpdir, 'main.tsv')
+      binding = File.join(tmpdir, 'binding.tsv')
+      top = File.join(tmpdir, 'top.tsv')
+      Open.write(main, step(:neo_epitopes).join.path.read.split("\n")[1..-1] * "\n")
+      CMD.cmd_log("pvacseq binding_filter #{main} #{binding} -c #{fold_change} -b #{binding_affinity}")
+      CMD.cmd_log("pvacseq top_score_filter #{binding} #{self.path}")
+    end
+    nil
+  end
+
+  dep :BAM
+  extension :vcf
+  dep_task :delly, HTS, :delly, :tumor => :BAM, :reference => Bellmunt.reference
 end
 
 module Sample
